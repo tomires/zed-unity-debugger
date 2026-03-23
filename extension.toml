@@ -1,0 +1,15 @@
+id = "unity-debugger"
+name = "Unity Debugger"
+version = "0.0.0"
+schema_version = 1
+authors = ["tomires <me@tomires.eu>"]
+description = "Debug Unity applications in Zed"
+repository = "https://github.com/tomires/zed-unity-debugger"
+
+[debug_adapters.unity]
+schema_path = "debug_adapter_schemas/unity.json"
+
+[[capabilities]]
+kind = "process:exec"
+command = "/bin/sh"
+args = ["**"]
