@@ -1,4 +1,4 @@
-# Zed Debugger for Unity
+# Unity Debugger for Zed
 
 <img width="988" height="771" alt="screenshot" src="https://github.com/user-attachments/assets/e83685ed-7b9c-4a0c-9e62-2e7301f89f3a" />
 
