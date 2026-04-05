@@ -2,15 +2,11 @@
 
 <img width="988" height="771" alt="screenshot" src="https://github.com/user-attachments/assets/e83685ed-7b9c-4a0c-9e62-2e7301f89f3a" />
 
-This extension allows you to debug Unity projects in Zed. In order to use it you will need to source your own debug adapter.
+This extension allows you to debug Unity projects in Zed. In order to use it you will need to source your own debug adapter. I recommend using ![unity-dap](https://github.com/walcht/unity-dap/releases) which supports Linux, macOS and Windows and works with all Unity projects utilizing the Mono scripting backend. Mono needs to be installed on your machine and added to PATH in order to use the tool.
 
 > [!IMPORTANT]
 > While using the debug adapter provided as part of Unity for Visual Studio Code package is technically possible,
 > the project's license specifically disallows use with non-Microsoft IDEs.
-
-> [!WARNING]
-> Extension has currently only been tested under macOS. It will be published on Zed's Marketplace once
-> an alternative permissively-licensed debug adapter becomes available.
 
 ## Setup
 
@@ -25,7 +21,7 @@ Open the folder housing your Unity project and create a *debug.json* file in *.z
     "label": "Attach to Unity Editor",
     "request": "attach",
     "projectPath": "${ZED_WORKTREE_ROOT}",
-    "adapterPath": "/path/to/UnityDebugAdapter.dll"
+    "adapterPath": "/path/to/unity-debug-adapter.exe/.dll"
 }]
 ```
 
