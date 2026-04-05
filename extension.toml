@@ -1,6 +1,6 @@
 id = "unity-debugger"
 name = "Unity Debugger"
-version = "0.0.0"
+version = "26.04.06"
 schema_version = 1
 authors = ["tomires <me@tomires.eu>"]
 description = "Debug Unity applications in Zed"
