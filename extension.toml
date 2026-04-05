@@ -19,3 +19,7 @@ kind = "process:exec"
 command = "mono"
 args = ["**"]
 
+[[capabilities]]
+kind = "process:exec"
+command = "cmd"
+args = ["**"]

@@ -47,28 +47,50 @@ impl UnityDebuggerExtension {
         Ok((path, runtime))
     }
 
-    fn discover_unity_port(&self) -> Result<String, String> {
-        let output = Command::new("/bin/sh")
-            .args([
-                "-c",
-                "lsof -i | grep Unity | grep -E '56[0-9]{3}' | awk '{print $9}' | grep -oE '56[0-9]{3}$'",
-            ])
-            .output()
-            .map_err(|e| format!("Failed to run Unity port discovery: {}", e))?;
+    fn discover_unity_port(&self, worktree: &Worktree) -> Result<String, String> {
+        let err = "Unity debugger not running. \
+                   Make sure Unity Editor is open with Debug code optimization enabled \
+                   (bottom toolbar toggle).";
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let port = stdout.lines().next().map(str::trim).unwrap_or("").to_string();
-
-        if port.is_empty() {
-            return Err(
-                "Unity debugger not running. \
-                 Make sure Unity Editor is open with Debug code optimization enabled \
-                 (bottom toolbar toggle)."
-                    .to_string(),
-            );
+        if worktree.which("lsof").is_some() {
+            // macOS and Linux: list TCP ports in Unity's SDB range that are LISTEN
+            let output = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "lsof -nP -i TCP:56000-56999 2>/dev/null \
+                     | grep LISTEN | awk '{print $9}' | grep -oE '[0-9]+$' | head -1",
+                ])
+                .output()
+                .map_err(|e| format!("Failed to run Unity port discovery: {}", e))?;
+            let port = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !port.is_empty() {
+                return Ok(format!("127.0.0.1:{}", port));
+            }
+        } else {
+            // Windows: run netstat and filter in Rust to avoid shell quoting issues
+            let output = Command::new("cmd")
+                .args(["/c", "netstat -an"])
+                .output()
+                .map_err(|e| format!("Failed to run Unity port discovery: {}", e))?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                // Format: "  TCP    127.0.0.1:56716    0.0.0.0:0    LISTENING"
+                if !line.contains("LISTENING") {
+                    continue;
+                }
+                if let Some(port) = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|addr| addr.rsplit_once(':'))
+                    .map(|(_, p)| p.trim())
+                    .filter(|p| p.len() == 5 && p.starts_with("56"))
+                {
+                    return Ok(format!("127.0.0.1:{}", port));
+                }
+            }
         }
 
-        Ok(format!("127.0.0.1:{}", port))
+        Err(err.to_string())
     }
 
     fn build_config(
@@ -130,18 +152,30 @@ impl zed::Extension for UnityDebuggerExtension {
             (path, mono)
         };
 
-        let command = if is_mono {
-            worktree.which("mono").ok_or_else(|| {
+        // COMSPEC is set on Windows (points to cmd.exe) and not on Unix.
+        let is_windows = worktree
+            .shell_env()
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("COMSPEC"));
+
+        // On Windows, net472 .exe files run natively under .NET Framework — no Mono needed.
+        // Using Mono on Windows as a subprocess causes pipe/stdio issues.
+        let (command, adapter_in_args) = if is_mono && is_windows {
+            (adapter_path.clone(), false)
+        } else if is_mono {
+            let mono = worktree.which("mono").ok_or_else(|| {
                 "Mono runtime (`mono`) not found on PATH. \
                  Install Mono from https://www.mono-project.com/download/stable/."
                     .to_string()
-            })?
+            })?;
+            (mono, true)
         } else {
-            worktree.which("dotnet").ok_or_else(|| {
+            let dotnet = worktree.which("dotnet").ok_or_else(|| {
                 ".NET runtime (`dotnet`) not found on PATH. \
                  Install .NET 9 or later from https://dotnet.microsoft.com/download."
                     .to_string()
-            })?
+            })?;
+            (dotnet, true)
         };
 
         let project_path = worktree.root_path();
@@ -149,7 +183,7 @@ impl zed::Extension for UnityDebuggerExtension {
         let raw: Value = serde_json::from_str(&config.config).unwrap_or_else(|_| json!({}));
         let endpoint = match raw.get("endPoint").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
             Some(ep) => ep.to_string(),
-            None => self.discover_unity_port()?,
+            None => self.discover_unity_port(worktree)?,
         };
 
         let adapter_config = self.build_config(&config.config, &project_path, &endpoint, is_mono);
@@ -165,7 +199,7 @@ impl zed::Extension for UnityDebuggerExtension {
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
             .unwrap_or_default();
 
-        let mut arguments = vec![adapter_path];
+        let mut arguments = if adapter_in_args { vec![adapter_path] } else { vec![] };
         arguments.extend(raw_args);
 
         Ok(DebugAdapterBinary {
