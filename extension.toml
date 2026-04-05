@@ -13,3 +13,9 @@ schema_path = "debug_adapter_schemas/unity.json"
 kind = "process:exec"
 command = "/bin/sh"
 args = ["**"]
+
+[[capabilities]]
+kind = "process:exec"
+command = "mono"
+args = ["**"]
+

@@ -6,34 +6,45 @@ use zed_extension_api::{
     StartDebuggingRequestArgumentsRequest, Worktree, process::Command, resolve_tcp_template,
 };
 
+enum AdapterRuntime {
+    /// dotnet <path> — for .NET Core / .NET 5+ managed assemblies (.dll)
+    Dotnet,
+    /// mono <path> — for Mono / .NET Framework assemblies (.exe)
+    Mono,
+}
+
 struct UnityDebuggerExtension;
 
 impl UnityDebuggerExtension {
-    fn find_adapter_dll(
+    /// Returns (adapter_path, runtime). Detects runtime from file extension:
+    /// `.exe` → Mono, anything else → dotnet.
+    fn find_adapter(
         &self,
         user_provided_path: Option<String>,
         config: &str,
-    ) -> Result<String, String> {
-        if let Some(path) = user_provided_path {
-            if !path.is_empty() {
-                return Ok(path);
-            }
-        }
+    ) -> Result<(String, AdapterRuntime), String> {
+        let path = user_provided_path
+            .filter(|p| !p.is_empty())
+            .or_else(|| {
+                serde_json::from_str::<Value>(config)
+                    .ok()
+                    .and_then(|cfg| cfg.get("adapterPath")?.as_str().map(str::to_string))
+                    .filter(|p| !p.is_empty())
+            })
+            .ok_or_else(|| {
+                "Adapter path not set. \
+                 Add `\"adapterPath\": \"/path/to/adapter.dll\"` (or `.exe`) \
+                 to your .zed/debug.json config."
+                    .to_string()
+            })?;
 
-        if let Ok(cfg) = serde_json::from_str::<Value>(config) {
-            if let Some(path) = cfg.get("adapterPath").and_then(|v| v.as_str()) {
-                if !path.is_empty() {
-                    return Ok(path.to_string());
-                }
-            }
-        }
+        let runtime = if path.ends_with(".exe") {
+            AdapterRuntime::Mono
+        } else {
+            AdapterRuntime::Dotnet
+        };
 
-        Err(
-            "UnityDebugAdapter.dll path not set. \
-             Add `\"adapterPath\": \"/path/to/UnityDebugAdapter.dll\"` to your \
-             .zed/debug.json config."
-                .to_string(),
-        )
+        Ok((path, runtime))
     }
 
     fn discover_unity_port(&self) -> Result<String, String> {
@@ -60,18 +71,40 @@ impl UnityDebuggerExtension {
         Ok(format!("127.0.0.1:{}", port))
     }
 
-    fn build_config(&self, raw_config: &str, project_path: &str, endpoint: &str) -> String {
+    fn build_config(
+        &self,
+        raw_config: &str,
+        project_path: &str,
+        endpoint: &str,
+        is_mono: bool,
+    ) -> String {
         let mut cfg: Value = serde_json::from_str(raw_config).unwrap_or_else(|_| json!({}));
 
         cfg["request"] = json!("attach");
-        cfg["endPoint"] = json!(endpoint);
 
-        if cfg.get("projectPath").is_none() || cfg["projectPath"] == json!(null) {
-            cfg["projectPath"] = json!(project_path);
+        if is_mono {
+            // unity-dap (net472/.exe) expects separate "address" and "port" fields
+            if let Some((host, port_str)) = endpoint.rsplit_once(':') {
+                cfg["address"] = json!(host);
+                if let Ok(port_num) = port_str.parse::<u16>() {
+                    cfg["port"] = json!(port_num);
+                }
+            }
+            if let Some(obj) = cfg.as_object_mut() {
+                obj.remove("projectPath");
+                obj.remove("endPoint");
+            }
+        } else {
+            // VSTU adapter (.dll) expects a combined "endPoint" string
+            cfg["endPoint"] = json!(endpoint);
+            if cfg.get("projectPath").is_none() || cfg["projectPath"] == json!(null) {
+                cfg["projectPath"] = json!(project_path);
+            }
         }
 
         if let Some(obj) = cfg.as_object_mut() {
             obj.remove("adapterPath");
+            obj.remove("adapterArgs");
         }
 
         serde_json::to_string(&cfg).unwrap_or_else(|_| raw_config.to_string())
@@ -90,13 +123,27 @@ impl zed::Extension for UnityDebuggerExtension {
         user_provided_debug_adapter_path: Option<String>,
         worktree: &Worktree,
     ) -> Result<DebugAdapterBinary, String> {
-        let dotnet = worktree.which("dotnet").ok_or_else(|| {
-            ".NET runtime (`dotnet`) not found on PATH. \
-             Install .NET 9 or later from https://dotnet.microsoft.com/download."
-                .to_string()
-        })?;
+        let (adapter_path, is_mono) = {
+            let (path, runtime) =
+                self.find_adapter(user_provided_debug_adapter_path, &config.config)?;
+            let mono = matches!(runtime, AdapterRuntime::Mono);
+            (path, mono)
+        };
 
-        let dll_path = self.find_adapter_dll(user_provided_debug_adapter_path, &config.config)?;
+        let command = if is_mono {
+            worktree.which("mono").ok_or_else(|| {
+                "Mono runtime (`mono`) not found on PATH. \
+                 Install Mono from https://www.mono-project.com/download/stable/."
+                    .to_string()
+            })?
+        } else {
+            worktree.which("dotnet").ok_or_else(|| {
+                ".NET runtime (`dotnet`) not found on PATH. \
+                 Install .NET 9 or later from https://dotnet.microsoft.com/download."
+                    .to_string()
+            })?
+        };
+
         let project_path = worktree.root_path();
 
         let raw: Value = serde_json::from_str(&config.config).unwrap_or_else(|_| json!({}));
@@ -105,16 +152,25 @@ impl zed::Extension for UnityDebuggerExtension {
             None => self.discover_unity_port()?,
         };
 
-        let adapter_config = self.build_config(&config.config, &project_path, &endpoint);
+        let adapter_config = self.build_config(&config.config, &project_path, &endpoint, is_mono);
 
         let connection = match config.tcp_connection {
             Some(template) => Some(resolve_tcp_template(template)?),
             None => None,
         };
 
+        let raw_args: Vec<String> = raw
+            .get("adapterArgs")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+
+        let mut arguments = vec![adapter_path];
+        arguments.extend(raw_args);
+
         Ok(DebugAdapterBinary {
-            command: Some(dotnet),
-            arguments: vec![dll_path],
+            command: Some(command),
+            arguments,
             envs: vec![],
             cwd: None,
             connection,

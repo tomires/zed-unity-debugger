@@ -22,7 +22,12 @@
     },
     "adapterPath": {
       "type": "string",
-      "description": "Absolute path to UnityDebugAdapter.dll."
+      "description": "Absolute path to the debug adapter assembly. .dll files are run via dotnet (VSTU adapter); .exe files are run via mono (unity-dap adapter)."
+    },
+    "adapterArgs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Extra CLI arguments passed to the adapter executable, e.g. [\"--log\", \"/tmp/adapter.log\"]."
     }
   },
   "additionalProperties": false
